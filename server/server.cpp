@@ -174,6 +174,10 @@ int main() {
             ws.send(state.dump());
         };
 
+        // Auto-play bots until it's the human's turn
+        while (!game.is_hand_over() && game.current_player() != you_index) {
+            bot_play(game);
+        }
         send_state();
 
         std::string msg;
