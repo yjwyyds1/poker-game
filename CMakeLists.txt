@@ -26,3 +26,14 @@ add_executable(poker_tests
     tests/test_evaluator.cpp
 )
 target_link_libraries(poker_tests PRIVATE poker_core)
+
+# WebSocket game server
+add_executable(poker_server
+    server/server.cpp
+)
+target_include_directories(poker_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(poker_server PRIVATE poker_core)
+
+if(WIN32)
+    target_link_libraries(poker_server PRIVATE ws2_32)
+endif()
