@@ -5,6 +5,10 @@
 #include <string>
 #include <random>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 static std::mt19937 rng(std::random_device{}());
 
 const char* phase_cn(Phase p) {
@@ -206,6 +210,10 @@ bool play_one_hand(GameEngine& game) {
 }
 
 int main() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
     GameEngine game(1, 2);
     game.add_player("你", 100);
     game.add_player("机器人A", 100);
