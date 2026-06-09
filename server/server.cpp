@@ -109,6 +109,8 @@ void bot_play(GameEngine& game) {
     auto allowed = game.allowed_actions(idx);
     const auto& p = game.players()[idx];
 
+    if (allowed.empty()) return;
+
     Action act;
     act.type = ActionType::Fold;
 
@@ -120,33 +122,30 @@ void bot_play(GameEngine& game) {
         if (a == ActionType::Raise) can_raise = true;
     }
 
-    int chips = p.chips;
+    int total_chips = p.chips + p.bet_amount;
     int pot = game.pot();
     int r = std::uniform_int_distribution<>(0, 99)(rng);
 
+    // Raise amount = current_bet + min_raise * N (1x or 2x)
+    int raise_1x = game.current_bet() + game.min_raise();
+    int raise_2x = game.current_bet() + game.min_raise() * 2;
+
     if (can_check && can_raise) {
-        if (r < 50) act.type = ActionType::Check;
-        else if (r < 80) {
+        if (r < 85) act.type = ActionType::Check;
+        else {
             act.type = ActionType::Raise;
-            act.amount = std::min(game.min_raise() * 2, chips);
-        } else act.type = ActionType::Check;
+            act.amount = std::min(raise_1x, total_chips);
+        }
     }
     else if (can_check) {
         act.type = ActionType::Check;
     }
     else if (can_call) {
-        float ratio = (float)call_amount / (float)(pot + call_amount);
-        if (r < 60 || ratio < 0.3f) {
-            if (can_raise && r < 70) {
-                act.type = ActionType::Raise;
-                act.amount = std::min(game.min_raise(), chips);
-            } else {
-                act.type = ActionType::Call;
-            }
-        } else if (r < 85) {
-            act.type = ActionType::Fold;
-        } else {
+        float ratio = call_amount > 0 ? (float)call_amount / (float)(pot + call_amount) : 0;
+        if (r < 85 || ratio < 0.5f) {
             act.type = ActionType::Call;
+        } else {
+            act.type = ActionType::Fold;
         }
     }
 
@@ -175,7 +174,7 @@ int main() {
         };
 
         // Auto-play bots until it's the human's turn
-        while (!game.is_hand_over() && game.current_player() != you_index) {
+        for (int safety = 0; !game.is_hand_over() && game.current_player() != you_index && safety < 500; safety++) {
             bot_play(game);
         }
         send_state();
@@ -190,6 +189,9 @@ int main() {
                     if (j.value("type", "") == "new_hand") {
                         game.start_hand();
                         waiting_for_new_hand = false;
+                        for (int safety = 0; !game.is_hand_over() && game.current_player() != you_index && safety < 500; safety++) {
+                            bot_play(game);
+                        }
                     }
                 } catch (...) {}
                 send_state();
@@ -205,7 +207,7 @@ int main() {
                 else if (action == "call") act.type = ActionType::Call;
                 else if (action == "raise") {
                     act.type = ActionType::Raise;
-                    act.amount = j.value("amount", game.min_raise());
+                    act.amount = j.value("amount", game.current_bet() + game.min_raise());
                 }
                 else if (action == "allin") act.type = ActionType::AllIn;
                 else continue;
@@ -216,7 +218,7 @@ int main() {
                     continue;
                 }
 
-                while (!game.is_hand_over() && game.current_player() != you_index) {
+                for (int safety = 0; !game.is_hand_over() && game.current_player() != you_index && safety < 500; safety++) {
                     bot_play(game);
                 }
 

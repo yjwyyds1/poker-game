@@ -67,8 +67,8 @@ void GameEngine::start_hand() {
     min_raise_ = big_blind_;
 
     // First to act preflop: player after big blind
-    int bb = next_active_player(dealer_idx_);
-    bb = next_active_player(bb); // skip SB, BB is next
+    int sb = next_active_player(dealer_idx_);
+    int bb = next_active_player(sb);
     current_player_idx_ = next_active_player(bb);
     last_raiser_idx_ = current_player_idx_;
     players_acted_ = 0;

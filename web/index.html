@@ -305,7 +305,7 @@ function updateUI() {
             document.getElementById('btn-check').textContent = 'Check';
         }
         if (has('raise') && !document.getElementById('raise-input').value) {
-            document.getElementById('raise-input').value = gs.min_raise || '';
+            document.getElementById('raise-input').value = gs.current_bet + (gs.min_raise || 0);
         }
     }
 
