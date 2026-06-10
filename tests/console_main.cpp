@@ -474,10 +474,6 @@ void show_results(GameEngine& game) {
         std::cout << "\n  ★ " << game.players()[w.player_index].name
                   << " 赢得 $" << w.won_amount << " (" << hand_cn(w.hand) << ")\n";
     }
-    // 淘汰
-    auto& pl = const_cast<std::vector<Player>&>(game.players());
-    pl.erase(std::remove_if(pl.begin(), pl.end(),
-        [](const Player& p) { return p.chips <= 0; }), pl.end());
 }
 
 // ── 设置 ──
@@ -521,25 +517,72 @@ int setup_players_count(int& human_seat) {
 
 void give_chips(GameEngine& game, int human_seat, int n) {
     std::cout << "\n  筹码:\n";
-    std::cout << "    1. $500\n    2. $1000\n    3. $10000\n    4. 自定义\n";
-    int c = read_int("  选择: ", 1, 4);
-    int chips = 1000;
-    if (c == 1) chips = 500;
-    else if (c == 3) chips = 10000;
-    else if (c == 4) chips = read_int("  金额 (1-1000000000): ", 1, 1000000000);
+    std::cout << "    1. 统一 $500\n    2. 统一 $1000\n    3. 统一 $10000\n";
+    std::cout << "    4. 统一自定义\n    5. 每人单独设置\n";
+    int c = read_int("  选择: ", 1, 5);
 
     const char* ai_names[] = {
         "\xE2\x99\xA0" "黑桃","\xE2\x99\xA5" "红心",
         "\xE2\x99\xA6" "方块","\xE2\x99\xA3" "梅花",
         "小盲","大盲","庄家","枪口","关煞"
     };
+
+    // 先加名字，筹码后面赋值
     for (int i = 0; i < n; i++) {
         std::string name;
         if (human_seat >= 0 && i == human_seat)
             name = "你";
         else
             name = ai_names[i % 9];
-        game.add_player(name, chips);
+        game.add_player(name, 0);
+    }
+
+    if (c >= 1 && c <= 4) {
+        int chips = 1000;
+        if (c == 1) chips = 500;
+        else if (c == 3) chips = 10000;
+        else if (c == 4) chips = read_int("  统一金额 (1-1000000000): ", 1, 1000000000);
+        for (int i = 0; i < n; i++)
+            const_cast<std::vector<Player>&>(game.players())[i].chips = chips;
+    } else {
+        for (int i = 0; i < n; i++) {
+            std::string label = game.players()[i].name;
+            int chips = read_int("  " + label + " 筹码 (1-1000000000): ", 1, 1000000000);
+            const_cast<std::vector<Player>&>(game.players())[i].chips = chips;
+        }
+    }
+
+    std::cout << "\n  当前筹码:\n";
+    for (int i = 0; i < n; i++) {
+        auto& p = const_cast<std::vector<Player>&>(game.players())[i];
+        std::cout << "    " << p.name << ": $" << p.chips << "\n";
+    }
+}
+
+void handle_busted_players(GameEngine& game, int human_seat) {
+    auto& pl = const_cast<std::vector<Player>&>(game.players());
+    for (int i = (int)pl.size() - 1; i >= 0; i--) {
+        if (pl[i].chips <= 0) {
+            bool is_human = (i == human_seat);
+            std::cout << "\n  " << pl[i].name << " 筹码归零!\n";
+            if (is_human || human_seat < 0) {
+                // 人类或观战模式: 问是否补筹码
+                std::cout << "    1. 补充筹码继续\n    2. 淘汰离开\n";
+                int choice = read_int("  选择: ", 1, 2);
+                if (choice == 1) {
+                    int rebuy = read_int("  补充金额: ", 1, 1000000000);
+                    pl[i].chips = rebuy;
+                    std::cout << "  " << pl[i].name << " 补充 $" << rebuy << "\n";
+                    continue;
+                }
+            }
+            // AI 或选择淘汰
+            std::cout << "  " << pl[i].name << " 被淘汰\n";
+            pl.erase(pl.begin() + i);
+            if (i <= human_seat && human_seat >= 0) human_seat--;
+            // 更新 AI 难度数组
+            if (i < (int)ai_levels.size()) ai_levels.erase(ai_levels.begin() + i);
+        }
     }
 }
 
@@ -556,6 +599,14 @@ bool game_loop(GameEngine& game, int human_seat) {
             play_spectate(game);
         }
         hand++;
+
+        // 处理破产玩家
+        handle_busted_players(game, human_seat);
+        if (game.players().size() < 2) {
+            std::cout << "\n  玩家不足, 游戏结束!\n";
+            return false;
+        }
+
         if (!read_bool("\n  继续下一局? (y/n): ")) return false;
     }
 }
