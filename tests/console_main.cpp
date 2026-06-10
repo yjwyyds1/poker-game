@@ -78,24 +78,119 @@ void press_enter() {
 }
 
 // ── 手牌胜率估算 ──
-// 翻牌前: 根据两张牌的 rank/gap/suited 估算对随机牌的胜率
+// 翻牌前: 根据两张牌 rank/gap/suited 估算
+// 翻牌后: 用牌型估算 + outs 调整
 
-int hand_strength_pct(const Card& a, const Card& b) {
+int preflop_equity(const Card& a, const Card& b) {
     int r1 = static_cast<int>(a.rank), r2 = static_cast<int>(b.rank);
     bool suited = a.suit == b.suit;
     bool pair = r1 == r2;
     int hi = std::max(r1, r2), lo = std::min(r1, r2);
     int gap = hi - lo - 1;
 
-    if (pair) return 60 + (hi - 5) * 3;           // 对子 60-78%
-    if (suited && gap == 0) return 52 + (hi - 8) * 2; // 同花连张
+    if (pair) return 60 + (hi - 5) * 3;
+    if (suited && gap == 0) return 52 + (hi - 8) * 2;
     if (suited && gap == 1) return 46 + (hi - 7) * 2;
     if (suited) return 38 + (hi - 8) * 2;
-    if (gap == 0) return 42 + (hi - 8) * 2;       // 不同花连张
-    if (hi >= 12 && lo >= 10) return 50;           // 两高张
+    if (gap == 0) return 42 + (hi - 8) * 2;
+    if (hi >= 12 && lo >= 10) return 50;
     if (hi >= 12) return 40;
     if (hi >= 9)  return 35;
     return 28 + (hi - 5);
+}
+
+// 翻后: 合并手牌+公牌评估当前牌型，估算胜率
+int postflop_equity(const Player& p, const std::vector<Card>& community) {
+    if (p.hole_cards.size() < 2 || community.empty()) return 50;
+    std::vector<Card> all = p.hole_cards;
+    all.insert(all.end(), community.begin(), community.end());
+    auto hand = HandEvaluator::evaluate(all);
+    switch (hand.type) {
+        case HandType::HighCard:      return 12 + hand.ranks[0] * 2;
+        case HandType::OnePair:       return 30 + hand.ranks[0] * 2;
+        case HandType::TwoPair:       return 55 + hand.ranks[0];
+        case HandType::ThreeOfAKind:  return 72 + hand.ranks[0];
+        case HandType::Straight:      return hand.ranks[0] >= 12 ? 92 : 85;
+        case HandType::Flush:         return hand.ranks[0] >= 12 ? 90 : 82;
+        case HandType::FullHouse:     return 95 + hand.ranks[0] / 4;
+        case HandType::FourOfAKind:   return 98;
+        case HandType::StraightFlush: return 99;
+    }
+    return 50;
+}
+
+// 计算补牌数(outs): 简化版，只统计同花/顺子补牌
+int count_outs(const Player& p, const std::vector<Card>& community) {
+    if (p.hole_cards.size() < 2) return 0;
+    std::vector<Card> all = p.hole_cards;
+    all.insert(all.end(), community.begin(), community.end());
+    auto hand = HandEvaluator::evaluate(all);
+
+    // 已有强牌则 outs=0 (不需要改进)
+    if (hand.type >= HandType::Straight) return 0;
+    if (hand.type >= HandType::ThreeOfAKind) return 2;  // 改进到葫芦/四条
+
+    int outs = 0;
+    // 同花听牌: 同花色已有 4 张
+    int suit_cnt[4] = {0};
+    for (auto& c : all) suit_cnt[static_cast<int>(c.suit)]++;
+    for (int s = 0; s < 4; s++)
+        if (suit_cnt[s] == 4) outs += 9;  // 9 张同花补牌
+
+    // 顺子听牌: 简化
+    uint8_t ranks[7];
+    for (size_t i = 0; i < all.size(); i++)
+        ranks[i] = static_cast<uint8_t>(all[i].rank);
+    std::sort(ranks, ranks + all.size());
+    // 两端顺子听牌约有 8 outs，卡顺有 4 outs
+    uint8_t* end = std::unique(ranks, ranks + all.size());
+    int unique = (int)(end - ranks);
+    if (unique >= 4) {
+        for (int i = 0; i <= unique - 4; i++) {
+            int gap = (ranks[i+3] - ranks[i]) - 3;
+            if (gap <= 2) outs += (3 - gap) * 4;  // open-ended: 8, gutshot: 4
+        }
+    }
+
+    // 对子改进到三条: 2 outs
+    if (hand.type == HandType::OnePair) outs += 2;
+    // 两对改进到葫芦: 4 outs
+    if (hand.type == HandType::TwoPair) outs += 4;
+
+    return std::min(outs, 20);
+}
+
+// 综合胜率估算
+int estimate_equity(const Player& p, const std::vector<Card>& community) {
+    if (community.empty())
+        return preflop_equity(p.hole_cards[0], p.hole_cards[1]);
+
+    int base = postflop_equity(p, community);
+    int outs = count_outs(p, community);
+    int remaining = 52 - 2 - (int)community.size();
+    if (remaining > 0)
+        base += (outs * 100 / remaining) / 2; // 补牌提升
+
+    return std::min(base, 99);
+}
+
+// ── 位置计算 ──
+// 返回 0=BTN(最晚) ~ n-2=UTG(最早), n-1=盲注
+int position_index(const GameEngine& game, int player_idx) {
+    int n = (int)game.players().size();
+    int dealer = game.dealer_index();
+    if (dealer < 0 || dealer >= n) return n;
+    // dealer 右手第一个 = 位置 0 (UTG 在 4 人局)
+    int pos = 0;
+    for (int i = (dealer + 1) % n; i != dealer; i = (i + 1) % n, pos++) {
+        if (i == player_idx) {
+            // BTN=dealer 是最晚位置
+            if (player_idx == dealer && game.phase() != Phase::PreFlop) return n - 1;
+            if (pos >= n - 2) return n - 1; // 盲注位置最后
+            return pos;
+        }
+    }
+    return 0;
 }
 
 std::string hand_desc(const Card& a, const Card& b) {
@@ -161,10 +256,10 @@ void show_hand(GameEngine& game) {
     auto& p = game.players()[game.current_player()];
     std::cout << "\n  手牌: ";
     if (p.hole_cards.size() == 2) {
-        int strength = hand_strength_pct(p.hole_cards[0], p.hole_cards[1]);
+        int eq = estimate_equity(p, game.community());
         std::cout << card_str(p.hole_cards[0]) << " " << card_str(p.hole_cards[1])
                   << " [" << hand_desc(p.hole_cards[0], p.hole_cards[1])
-                  << " 胜率≈" << strength << "%]\n";
+                  << " 胜率≈" << eq << "%]\n";
     }
     std::cout << "  输入> ";
 }
@@ -189,9 +284,7 @@ void bot_play(GameEngine& game, bool verbose = true) {
     }
 
     // 手牌强度
-    int equity = 50;
-    if (p.hole_cards.size() == 2)
-        equity = hand_strength_pct(p.hole_cards[0], p.hole_cards[1]);
+    int equity = estimate_equity(p, game.community());
 
     // 底池赔率
     int pot = game.pot();
@@ -205,46 +298,72 @@ void bot_play(GameEngine& game, bool verbose = true) {
     std::string reason;
 
     // LV 参数: {fold强牌阈值, raise率, bluff率}
-    struct { int fold_thresh; int raise_rate; int bluff_rate; } cfg;
-    if (lv == 1)      cfg = {30,  5,  0};
-    else if (lv == 2) cfg = {15, 15,  3};
-    else              cfg = { 5, 30, 10};
+    // ── 难度参数 + 位置调整 ──
+    int base_fold = 0, base_raise = 0, base_bluff = 0;
+    if (lv == 1)      { base_fold = 30; base_raise =  5; base_bluff =  0; }
+    else if (lv == 2) { base_fold = 18; base_raise = 15; base_bluff =  3; }
+    else              { base_fold =  8; base_raise = 28; base_bluff =  8; }
 
+    int pos = position_index(game, idx);
+    int n = (int)game.players().size();
+    double pos_adj = (pos > n / 2) ? 1.15 : (pos < n / 3) ? 0.85 : 1.0;
+    int fold_thresh = (int)(base_fold * (2.0 - pos_adj));
+    int raise_rate  = (int)(base_raise * pos_adj);
+    int bluff_rate  = (int)(base_bluff * pos_adj);
+
+    // ── 下注尺度 ──
+    int total_chips = p.chips + p.bet_amount;
+    int min_r = game.current_bet() + game.min_raise();
+    int small_bet = std::min(min_r * 2, total_chips);
+    int med_bet   = std::min(pot / 2 + game.current_bet(), total_chips);
+    int large_bet = std::min(pot + game.current_bet(), total_chips);
+
+    // ── 决策 ──
     if (can_check && can_raise) {
-        if (r < cfg.raise_rate) {
+        if (r < raise_rate && equity > 55) {
             act.type = ActionType::Raise;
-            act.amount = game.current_bet() + game.min_raise();
-            reason = "半诈唬加注";
+            act.amount = equity > 75 ? med_bet : small_bet;
+            reason = "价值加注";
+        } else if (r < raise_rate / 2) {
+            act.type = ActionType::Raise;
+            act.amount = small_bet;
+            reason = "试探下注";
         } else {
             act.type = ActionType::Check;
-            reason = "控池过牌";
+            reason = equity > 50 ? "慢打过牌" : "控池过牌";
         }
     } else if (can_check) {
         act.type = ActionType::Check;
-        reason = "过牌看牌";
+        reason = "过牌";
     } else if (can_call) {
-        if (can_raise && r < cfg.raise_rate) {
+        if (can_raise && r < raise_rate && equity > 55) {
             act.type = ActionType::Raise;
-            act.amount = game.current_bet() + game.min_raise();
-            reason = "价值加注";
-        } else if (equity < cfg.fold_thresh && r < 60) {
-            act.type = ActionType::Fold;
-            reason = "牌力太弱弃牌";
-        } else if (r < cfg.bluff_rate && can_raise) {
+            if (equity > 80) act.amount = large_bet;
+            else if (equity > 65) act.amount = med_bet;
+            else act.amount = small_bet;
+            reason = "价值加注(" + std::to_string(equity) + "%)";
+        } else if (r < bluff_rate && can_raise) {
             act.type = ActionType::Raise;
-            act.amount = game.current_bet() + game.min_raise() * 2;
+            act.amount = large_bet;
             reason = "诈唬!";
-        } else if (equity < pot_odds_pct && r < 60 && can_raise) {
+        } else if (equity < fold_thresh && r < 70) {
             act.type = ActionType::Fold;
-            reason = "赔率不划算";
+            reason = "牌力不足(" + std::to_string(equity) + "%<" + std::to_string(fold_thresh) + "%)";
+        } else if (equity < pot_odds_pct && r < 75) {
+            act.type = ActionType::Fold;
+            reason = "赔率差(" + std::to_string(equity) + "%<" + std::to_string(pot_odds_pct) + "%)";
         } else {
             act.type = ActionType::Call;
-            reason = "赔率合适跟注";
+            reason = equity > pot_odds_pct
+                ? "+EV跟(胜率" + std::to_string(equity) + "%>赔率" + std::to_string(pot_odds_pct) + "%)"
+                : "跟注看牌";
         }
     }
 
     if (verbose) {
-        std::cout << "    " << p.name << " [LV" << lv << "] ";
+        const char* pos_str[] = {"UTG","EP","MP","HJ","CO","BTN","SB","BB","DEF"};
+        int pi = std::min(pos, 8);
+        std::cout << "    " << p.name << " [LV" << lv << " " << pos_str[pi] << "] ";
         if (p.hole_cards.size() == 2)
             std::cout << "{" << card_str(p.hole_cards[0]) << card_str(p.hole_cards[1])
                       << " 胜率≈" << equity << "%} ";
@@ -255,8 +374,7 @@ void bot_play(GameEngine& game, bool verbose = true) {
             case ActionType::Check:
                 std::cout << "过牌"; break;
             case ActionType::Call:
-                std::cout << "跟注 $" << call_amt
-                          << " (底池赔率≈" << pot_odds_pct << "%)"; break;
+                std::cout << "跟注 $" << call_amt; break;
             case ActionType::Raise:
                 std::cout << "加注到 $" << act.amount; break;
             case ActionType::AllIn:
@@ -320,7 +438,7 @@ void play_spectate(GameEngine& game) {
         int cur = game.current_player();
         auto& p = game.players()[cur];
         if (p.hole_cards.size() == 2) {
-            int equity = hand_strength_pct(p.hole_cards[0], p.hole_cards[1]);
+            int equity = estimate_equity(p, game.community());
             std::cout << "  [" << p.name << "手牌: "
                       << card_str(p.hole_cards[0]) << card_str(p.hole_cards[1])
                       << " " << hand_desc(p.hole_cards[0], p.hole_cards[1])
